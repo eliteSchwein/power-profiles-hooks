@@ -1,84 +1,69 @@
 #!/usr/bin/env python3
-# power-profiles-hooks by Karim Vergnes <me@thesola.io>
-# D-Bus listener for power-profiles-daemon
-# Licensed under Creative Commons Zero
+# power-profiles-hooks - minimal, no logging
 
-import dbus
 import os
+import dbus
 
-from gi.repository      import GLib
+from gi.repository import GLib
 from dbus.mainloop.glib import DBusGMainLoop
 
-SENDER = "net.hadess.PowerProfiles"
-OBJECT = "/net/hadess/PowerProfiles"
-IFACE = "org.freedesktop.DBus.Properties"
+SENDER      = "net.hadess.PowerProfiles"
+OBJECT      = "/net/hadess/PowerProfiles"
+IFACE_PPD   = "net.hadess.PowerProfiles"
+IFACE_PROPS = "org.freedesktop.DBus.Properties"
 
-PREFIXES = ['/etc','/usr/local/etc']
-
-iface: dbus.Interface
-bus: dbus.Bus
+PREFIXES = ["/etc", "/usr/local/etc"]
 
 oldprof = ""
 
-def runhooks(prof):
+
+def runhooks(prof: str) -> None:
     for pr in PREFIXES:
-        if os.path.isdir(f"{pr}/power-profiles.d/{prof}"):
-            for hk in os.listdir(f"{pr}/power-profiles.d/{prof}"):
-                os.system(f"{pr}/power-profiles.d/{prof}/{hk}")
+        d = f"{pr}/power-profiles.d/{prof}"
+        if not os.path.isdir(d):
+            continue
+
+        for hk in sorted(os.listdir(d)):
+            path = os.path.join(d, hk)
+            if os.access(path, os.X_OK):
+                os.system(path)
 
 
-def handle_lock(msg):
-    locks = msg.get_args_list()[1]
-    maxprof = "performance"
-    if "ActiveProfileHolds" in locks.keys():
-        # After some testing, I found that power-saver locks always win
-        # over performance locks, regardless of order or concurrency.
-        for lk in locks["ActiveProfileHolds"]:
-            if lk["Profile"] == "power-saver":
-                maxprof = "power-saver"
-        # No remaining hooks.
-        if len(locks["ActiveProfileHolds"]) == 0:
-            maxprof = oldprof
-
-        runhooks(maxprof)
-
-def handle_change(msg):
+def on_properties_changed(iface_name, changed, invalidated):
     global oldprof
-    newprof = msg.get_args_list()[2]
-    runhooks(newprof)
 
-    oldprof = newprof
+    if iface_name != IFACE_PPD:
+        return
+
+    if "ActiveProfile" in changed:
+        newprof = str(changed["ActiveProfile"])
+        runhooks(newprof)
+        oldprof = newprof
 
 
-def callback(bus, msg):
-    if msg.get_interface() == IFACE and msg.get_member() == "Set":
-        handle_change(msg)
-    elif msg.get_interface() == IFACE and msg.get_member() == "PropertiesChanged":
-        handle_lock(msg)
+def main() -> None:
+    global oldprof
 
-if __name__ == '__main__':
     DBusGMainLoop(set_as_default=True)
     bus = dbus.SystemBus()
 
-    dbus_obj = dbus.Interface(
-            bus.get_object('org.freedesktop.DBus', '/org/freedesktop/DBus'),
-            'org.freedesktop.DBus.Monitoring')
-
-
     obj = bus.get_object(SENDER, OBJECT)
-    iface = dbus.Interface(obj, IFACE)
+    props = dbus.Interface(obj, IFACE_PROPS)
 
-    oldprof = iface.Get(SENDER, "ActiveProfile")
-
-    print(f"Set profile at launch is '{oldprof}'")
-
-    # Apply hooks for existing power profile
+    oldprof = str(props.Get(IFACE_PPD, "ActiveProfile"))
     runhooks(oldprof)
 
-    # At this point we are no longer allowed to send D-Bus messages directly.
-    dbus_obj.BecomeMonitor([f"path='{OBJECT}'"],
-                           dbus.UInt32(0))
+    bus.add_signal_receiver(
+        on_properties_changed,
+        signal_name="PropertiesChanged",
+        dbus_interface=IFACE_PROPS,
+        path=OBJECT,
+        bus_name=SENDER,
+        arg0=IFACE_PPD,
+    )
 
-    bus.add_message_filter(callback)
-    mainloop = GLib.MainLoop()
-    mainloop.run()
+    GLib.MainLoop().run()
+
+
+if __name__ == "__main__":
+    main()
